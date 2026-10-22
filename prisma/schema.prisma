@@ -1,0 +1,216 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Typed JSON columns (Course.settings, Course.theme, Page.data, Block.data, Block.design) are
+// validated with the zod schemas in packages/schema before every write.
+
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  name         String
+  /// scrypt hash "salt:hash" (hex); null for accounts that never set a password
+  passwordHash String?
+  avatarUrl    String?
+  createdAt    DateTime     @default(now())
+  courses      Course[]
+  folders      Folder[]
+  sessions     Session[]
+  media        MediaAsset[]
+  themes       SavedTheme[]
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  /// sha256 of the random cookie token; the raw token is never stored
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model MediaAsset {
+  id         String   @id @default(uuid())
+  ownerId    String
+  owner      User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  filename   String
+  mimeType   String
+  size       Int
+  /// path relative to the media storage root
+  storageKey String   @unique
+  width      Int?
+  height     Int?
+  /// image alt text suggestion / video duration etc.
+  alt        String   @default("")
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([ownerId, createdAt])
+}
+
+model Folder {
+  id        String   @id @default(uuid())
+  name      String
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// nested folders
+  parentId  String?
+  parent    Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Folder[] @relation("FolderTree")
+  courses   Course[]
+  createdAt DateTime @default(now())
+
+  @@index([ownerId])
+}
+
+model SavedTheme {
+  id        String   @id @default(uuid())
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name      String
+  /// Theme (packages/schema settings.ts)
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+enum MaterialType {
+  COURSE
+  MICROLEARNING
+}
+
+enum CourseStatus {
+  DRAFT
+  IN_PROGRESS
+  IN_REVIEW
+  APPROVED
+  PUBLISHED
+  NEEDS_UPDATE
+  ARCHIVED
+}
+
+model Course {
+  id            String       @id @default(uuid())
+  title         String
+  description   String       @default("")
+  language      String       @default("en")
+  materialType  MaterialType @default(COURSE)
+  status        CourseStatus @default(DRAFT)
+  templateKey   String       @default("universal")
+  /// CourseSettings
+  settings      Json
+  /// Theme
+  theme         Json
+  coverImageUrl String?
+  showAuthor    Boolean      @default(true)
+  ownerId       String
+  owner         User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folderId      String?
+  folder        Folder?      @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  sections      Section[]
+  /// course-level blocks: INTRO, PASSED, FAILED slots
+  blocks        Block[]
+  /// soft delete (30-day trash)
+  deletedAt     DateTime?
+  publishedAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([ownerId, deletedAt, updatedAt])
+}
+
+model Section {
+  id                String   @id @default(uuid())
+  courseId          String
+  course            Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title             String
+  learningObjective String   @default("")
+  imageUrl          String?
+  /// hidden container (single-page layouts): learners don't see a section header
+  isTransparent     Boolean  @default(false)
+  position          Int
+  pages             Page[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([courseId, position])
+}
+
+model Page {
+  id                String   @id @default(uuid())
+  sectionId         String
+  section           Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  /// PageType: "content" or a question type (packages/schema questions.ts)
+  type              String
+  title             String
+  hideTitle         Boolean  @default(false)
+  /// 0 scored, 1 not scored, 2 survey
+  scoringMode       Int      @default(0)
+  /// true: one correct/incorrect response; false: explanation per answer option
+  isGeneralFeedback Boolean  @default(true)
+  hasInstruction    Boolean  @default(false)
+  voiceOverUrl      String?
+  /// questionData[type]
+  data              Json
+  position          Int
+  /// set when this question is embedded inline in a content page (via a questionRef block);
+  /// embedded questions are hidden from the outline
+  embeddedInPageId  String?
+  blocks            Block[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([sectionId, position])
+  @@index([embeddedInPageId])
+}
+
+enum BlockSlot {
+  BODY
+  INSTRUCTION
+  CORRECT
+  INCORRECT
+  SURVEY
+  EXPLANATION
+  INTRO
+  PASSED
+  FAILED
+}
+
+model Block {
+  id        String    @id @default(uuid())
+  /// exactly one of pageId / courseId is set
+  pageId    String?
+  page      Page?     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  courseId  String?
+  course    Course?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  slot      BlockSlot @default(BODY)
+  /// EXPLANATION slot: id of the answer option / statement this explains
+  answerKey String?
+  /// sideBySide children point at their row
+  parentId  String?
+  parent    Block?    @relation("BlockChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Block[]   @relation("BlockChildren")
+  /// BlockType (packages/schema blocks.ts)
+  type      String
+  /// blockData[type]
+  data      Json
+  /// BlockDesign
+  design    Json
+  position  Int
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([pageId, slot, position])
+  @@index([courseId, slot, position])
+  @@index([parentId])
+}
